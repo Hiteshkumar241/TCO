@@ -1,0 +1,504 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Feb 15 13:23:43 2019
+
+@author: h.amipara
+"""
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import xlrd
+import scipy as sp
+import scipy.stats as stats
+import matplotlib.pyplot as plt
+import statistics
+from scipy.stats import norm
+from statistics import mode
+import datetime
+import os
+src =r'E:\Users\h.amipara\h\new\TruckChar.xlsx'  #path for all parameters of LDV vehicles
+dollarToEUR=1.14 #21.01.2019
+busType = ['FCT','BET','DT'] #fuel cell truck, battery electric truck, diesel truck
+#input paramters
+
+betParams=pd.read_excel(src,sheetname='BET')
+fctParams =pd.read_excel(src,sheetname='FCT')
+ictParams =pd.read_excel(src,sheetname='DT')
+
+#parameters capacity including e-motor power, fuel cell power, conventional power etc
+betParams1=pd.read_excel(src,sheetname='BET_P')
+fctParams1 =pd.read_excel(src,sheetname='FCT_P')
+ictParams1 =pd.read_excel(src,sheetname='DT_P')
+#glider cost [euro]
+glider =pd.read_excel(src,sheetname='CB')
+#fuel cost
+h2Params1=pd.read_excel(src,sheetname='H_cost')
+eleParams1 =pd.read_excel(src,sheetname='E_cost')
+dieParams1 =pd.read_excel(src,sheetname='D_cost')
+#mainenacne and repair costs
+MR =pd.read_excel(src,sheetname='MR')
+#Cost for Additional powerelectronics including converter, inverter, controller (EUR/kW) for BEV, and FCEV 
+#price in year 2015, and 2030 is taken from the excel sheet and then linearize for year 2015 to 2030
+ads = pd.Series([fctParams1[2015]['AP'],fctParams1[2030]['AP']],index=[2015,2030])
+
+for year in np.arange(2016,2030):
+    ads[year] = ads[2015]+(ads[2030]-ads[2015])/15*(year-2015)
+    
+ads = ads.sort_index()
+
+#E-motor cost for BEV and FCEV (EUR/kW)
+#price in year 2015, and 2030 is taken from the excel sheet and then linearize for year 2015 to 2030
+motor = pd.Series([fctParams1[2015]['motor'],fctParams1[2030]['motor']],index=[2015,2030])
+
+for year in np.arange(2016,2030):
+    motor[year] = motor[2015]+(motor[2030]-motor[2015])/15*(year-2015)
+    
+motor = motor.sort_index()
+
+Ftank = 1.9 #1.9 euro/kw for 2020,2025,2030 from steffen 2016
+
+
+G = glider['LDV']['Glider'] #in euro
+print("Glider cost of 3.5t truck in Euro:",G)
+
+#conventional engine cost (EUR/kW) for ICEV 
+#price in year 2012, 2020, and 2030 is taken from the excel sheet and then linearize for year 2012 to 2020, and 2020 to 2030 
+ice = pd.Series(np.array([ictParams1[2012]['Engine'],ictParams1[2020]['Engine'],ictParams1[2030]['Engine']]),index=[2012,2020,2030]).T  #EUR/kw CE_delft
+
+for year in np.arange(2013,2020):
+    ice[year]=ice[2012]+(ice[2020]-ice[2012])/8*(year-2012)
+for year in np.arange(2021,2030):
+    ice[year]=ice[2020]+(ice[2030]-ice[2020])/10*(year-2020)
+    
+ice = ice.sort_index()
+
+
+#fuel cell system cost FCEV [EUR/kW]   
+#price in year 2020, 2025, and 2030 is taken from the excel sheet and then linearize for year 2020 to 2025, and 2025 to 2030     
+fuelCell=pd.Series([fctParams1[2020]['Fuel_cell'],fctParams1[2025]['Fuel_cell'],fctParams1[2030]['Fuel_cell']],index=[2020,2025,2030]) 
+
+
+for year in np.arange(2021,2025):
+    fuelCell[year]=fuelCell[2020]+(fuelCell[2025]-fuelCell[2020])/5*(year-2020)
+for year in np.arange(2026,2030):
+    fuelCell[year]=fuelCell[2025]+(fuelCell[2030]-fuelCell[2025])/5*(year-2025)
+
+fuelCell=fuelCell.sort_index()
+
+#EUR/kwh DOE 2017 target cost, CHTank stand compressed hydrogen storage cost
+#price in year 2020, 2025, and 2030 is taken from the excel sheet and then linearize for year 2020 to 2025, and 2025 to 2030
+CHTank_euro = np.array([fctParams1[2020]['CHTank'],fctParams1[2025]['CHTank'],fctParams1[2030]['CHTank']])
+CHTankYear = [2020,2025,2030]
+CHTank = pd.Series(CHTank_euro,index=CHTankYear).T #EUR/kwh
+
+for year in np.arange(2015,2019):
+    CHTank[year] = CHTank[2020]
+for year in np.arange(2021,2025):
+    CHTank[year] = CHTank[2020]+(CHTank[2025]-CHTank[2020])/5*(year-2020)
+for year in np.arange(2026,2030):
+    CHTank[year]=CHTank[2025]+(CHTank[2030]-CHTank[2025])/5*(year-2025)
+CHTank = CHTank.sort_index()
+
+#battery size calculation based on regression anaysis and W_t is the GVW of vehicle in tonne    
+
+def Bsize(Range,W_t):#Bsize[kWh]
+    
+    a = 48.38050187 + 3.43211476 * W_t  #linear regression equation  [kWh/100km] for BET
+    
+    Bsize = (a * Range)/100/0.80  #0.80 is the DOD of battery
+    
+    
+    return Bsize
+#hydorgen consumption [kWh/100km]
+def H(W_t):
+    
+    a= ((4.78624494 * W_t + 100.33798721)) # kwh/100km linear regression euation for FCT and 3.5 is the GVW of the LDV
+    #after getting energy consumption per 100 km, there is 0.5 % effciency of fuel cell powertrain gain used for every year from 2020-2030
+    b= (a-(a*0.053))  
+
+    c =np.array([a,b])
+
+    y_H = pd.Series(c,index=[2020,2030])
+    
+    for year in np.arange(2021,2030):
+        
+    
+        y_H[year] = y_H[2020]+(y_H[2030]-y_H[2020])/10*(year-2020)
+    
+        y_H = y_H.sort_index() #final energy consumption for FCT with efficiency gain
+
+    
+    return y_H
+
+#hydrogen storage tank capacity based on daily range
+def H_tank(Range,W_t,year):#H_tank[kWh]
+
+    H_storage = (H(W_t)[year] * Range)/100
+    
+    return H_storage
+#transport storage capacity [tonne]
+M_capacity = 1.1
+#effect of weight and mileage on transport capacity for BET
+def x(Range,W_t):
+    
+    a = Bsize(Range,W_t)/betParams[year]['Energy_density']+betParams[year]['ElectricMotor']/betParams[year]['Power_densityM']  #235 is the energy density Wh/kg
+    
+    b = M_capacity/(M_capacity-a)
+    
+    return b #transport loss correction factor   
+#effect of weight and mileage on transport capacity for FCT
+def y(year,Range,W_t):
+    
+    a = (fctParams[year]['Fuelcell']*1000)/fctParams[year]['Power_density']  #650 is the power density of fuel cell [W/kg]
+    
+    b = ((H_tank(Range,W_t,year)/33.33)*100)/5.4
+    
+    e = (fctParams.loc['Battery',year])/betParams[year]['Energy_density']+fctParams[year]['ElectricMotor']/fctParams[year]['Power_densityM']   #235 is the energy density of battery [Wh/kg]
+    
+    c1 = (a + b)/1000
+    
+    c = c1+e
+    
+    d = M_capacity/(M_capacity-c)
+    return d   #transport loss correction factor  
+
+
+batt = 200 #battery in EURO from CE_DElft for ICV
+
+#CE_delft,Based on den Boer et al., 2013; Slowik et al., 2016; Wolfram & Lutsey, 2016
+#Li-ion Battery pack cost for BEV [EUR/kWh] 
+#price in year 2015, 2020, and 2030 is taken from the excel sheet and then linearize for 2015 to 2020, and 2020 to 2030     
+battery_euro=np.array([540,betParams1[2015]['Battery'],betParams1[2020]['Battery'],betParams1[2030]['Battery']])
+
+batteryYear=[2014,2015,2020,2030]
+battery=pd.Series(battery_euro,index=batteryYear).T #EUR/kWh
+
+
+for year in np.arange(2016,2020):
+    battery[year]=battery[2015]+(battery[2020]-battery[2015])/5*(year-2015)
+
+for year in np.arange(2021,2030):
+    battery[year]=battery[2020]+(battery[2030]-battery[2020])/10*(year-2020)
+battery=battery.sort_index()
+#this calculation for the small size battery which used in FCEV
+size=[1,10,15,20,25,30,35,40,45,50,60]
+bCost=np.array([1080,691,588,524,479,445,419,397,379,363,337])#euro/kWH
+sizeEffect=pd.Series(bCost,index=size).T
+
+def batteryCost(size,year,W_t): #euro/kWh
+    
+    if size<11:#size of the battery
+        sizeEff=bCost[0]+(bCost[1]-bCost[0])/9*(size-1)
+    elif size<15:
+        sizeEff=bCost[1]+(bCost[2]-bCost[1])/5*(size-10)
+    elif size<20:
+        sizeEff=bCost[2]+(bCost[3]-bCost[2])/5*(size-15)
+    elif size<25:
+        sizeEff=bCost[3]+(bCost[4]-bCost[3])/5*(size-20)
+    elif size<30:
+        sizeEff=bCost[4]+(bCost[5]-bCost[4])/5*(size-25)
+    elif size<35:
+        sizeEff=bCost[5]+(bCost[6]-bCost[5])/5*(size-30)
+    elif size<40:
+        sizeEff=bCost[6]+(bCost[7]-bCost[6])/5*(size-35)
+    elif size<45:
+        sizeEff=bCost[7]+(bCost[8]-bCost[7])/5*(size-40)
+    elif size<50:
+        sizeEff=bCost[8]+(bCost[9]-bCost[8])/5*(size-45)
+    elif size<60:
+        sizeEff=bCost[9]+(bCost[10]-bCost[9])/10*(size-50)
+    else:
+        sizeEff = bCost[10]
+    
+    yearEff=battery[year]/battery[2014] #here use based year 2014 from the literature
+    
+    batteryCost=sizeEff*yearEff
+    
+    return batteryCost  
+
+def batteryCostDf(year,W_t,Range):
+    
+    batteryCostDf = pd.DataFrame(index=['FCT','BET'])
+    
+        
+    batterySize_fct = fctParams.loc['Battery',year] #for FCT
+    
+    batterySize_bet = Bsize(Range,W_t)#for BET
+    
+        
+    batteryCostDf[year]=[batteryCost(batterySize_fct,year,W_t),batteryCost(batterySize_bet,year,W_t)]
+        
+    return batteryCostDf 
+
+#battery replacement calculation
+
+def Number_battery(lifetime,km,Range):
+    
+    C_v = (lifetime * km)/Range  #lifetime of the battery
+    
+    C_b = 2000 #2000 hours from literature Steffen Bubeck
+    
+    NB = C_v/C_b
+    
+    return NB
+
+#here 1.5 is the retail price equilvalent factor (RPE)
+#purchasing price has included chasis and body cost, powertrain cost
+#powertrain costs are driven based on bottom-up appraoch   
+#purchasing_cost in [Euro]     
+def Purchase_Price(year,W_t,Range,lifetime,km):
+    
+    f = 1.5*(CHTank[year]*H_tank(Range,W_t,year) + (motor[year]+ads[year])*fctParams[year]['ElectricMotor']\
+      + fuelCell[year]*fctParams[year]['Fuelcell'] + batteryCostDf(year,W_t,Range)[year]['FCT']*fctParams[year]['Battery'] + G )
+    fct = f
+    
+    
+    
+    b = 1.5*((motor[year]+ads[year])*betParams[year]['ElectricMotor'] + G \
+      +battery[year]*Bsize(Range,W_t) *Number_battery(lifetime,km,Range))
+    bet = b
+    i = 1.5*(ice[year]*ictParams[year]['Engine'] + Ftank*ictParams[year]['Engine'] + G + batt)
+    ict = i
+    p1 = np.array([fct,bet,ict])
+    Purchase_Price = pd.Series(p1,index = busType)
+    
+    
+    return Purchase_Price
+#capex[euro/km] has purchasing price - resale price [euro/km] and resale of ldv is 10% of the initial purchasing price after 10 years
+def CAPEX(year,km,W_t,Range,lifetime):
+    
+    
+    purchasingprice = Purchase_Price(year,W_t,Range,lifetime,km) #euro
+    
+    
+    
+    
+    i = 0.08  # loan rate%
+    N = lifetime  # holding time[a]
+    
+    CRF = ((1+i)**N)*i/((1+i)**N-1)   #capital recovery factor
+    
+    PVF = 1/((1+i)**N)  #present value factor
+    
+    CAPEX = ((purchasingprice-purchasingprice*0.10 * PVF)*CRF)/km
+    return CAPEX
+
+
+
+
+#Hydrogen cost EUR/kg
+#price in year 2020,2025, and 2030 is taken from the excel sheet and then linearize for year 2020 to 2025, 2025 to 2030
+H_cost=pd.Series([h2Params1[2020]['Hcost'],h2Params1[2025]['Hcost'],h2Params1[2030]['Hcost']],index=[2020,2025,2030]) #EUR/kg
+
+
+for year in np.arange(2021,2025):
+     H_cost[year]= H_cost[2020]+( H_cost[2025]- H_cost[2020])/5*(year-2020)
+for year in np.arange(2026,2030):
+     H_cost[year]= H_cost[2025]+( H_cost[2030]- H_cost[2025])/5*(year-2025)
+
+    
+H_cost= H_cost.sort_index()
+
+#Electricity cost EUR/kWh
+#price in year 2015,2020 and 2030 is taken from the excel sheet and then linearize for year 2015 to 2020, and 2020 to 2030
+Ele_euro = np.array([eleParams1[2015]['Ecost'],eleParams1[2020]['Ecost'],eleParams1[2030]['Ecost']])
+
+Electricity_cost = pd.Series(Ele_euro,index=[2015,2020,2030]) # EUR/kwh
+
+for year in np.arange(2010,2015):
+    Electricity_cost[year]= Electricity_cost[2015]
+for year in np.arange(2016,2020):
+    Electricity_cost[year]= Electricity_cost[2015]+( Electricity_cost[2020]- Electricity_cost[2015])/5*(year-2015)
+for year in np.arange(2021,2030):
+     Electricity_cost[year]= Electricity_cost[2020]+( Electricity_cost[2030]- Electricity_cost[2020])/10*(year-2020)
+
+   
+Electricity_cost= Electricity_cost.sort_index()
+
+#Diesel cost EUR/L
+#price in year 2015,2020 and 2030 is taken from the excel sheet and then linearize for year 2015 to 2020, and 2020 to 2030
+Diesel_cost = pd.Series([dieParams1[2015]['Dcost'],dieParams1[2020]['Dcost'],dieParams1[2030]['Dcost']],index=[2015,2020,2030]) # EUR/l
+
+for year in np.arange(2010,2015):
+    Diesel_cost[year]= Diesel_cost[2015]
+for year in np.arange(2016,2020):
+    Diesel_cost[year]= Diesel_cost[2015]+( Diesel_cost[2020]- Diesel_cost[2015])/5*(year-2015)
+for year in np.arange(2021,2030):
+     Diesel_cost[year]= Diesel_cost[2020]+( Diesel_cost[2030]- Diesel_cost[2020])/10*(year-2020)
+
+    
+Diesel_cost= Diesel_cost.sort_index()
+
+# MR1 is  for FCEB
+#price in year 2015 and 2030 is taken from the excel sheet and then linearize for year 2015 to 2030
+MR1_cost = pd.Series([MR[2015]['MR_F'],MR[2030]['MR_F']],index=[2015,2030]) # EUR/km
+
+for year in np.arange(2010,2015):
+    MR1_cost[year]= MR1_cost[2015]
+for year in np.arange(2016,2030):
+     MR1_cost[year]= MR1_cost[2015]+( MR1_cost[2030]- MR1_cost[2015])/15*(year-2015)
+
+    
+MR1_cost= MR1_cost.sort_index()
+
+#MR2 is for ICB
+#price in year 2015 and 2030 is taken from the excel sheet and then linearize for year 2015 to 2030
+MR2_cost = pd.Series([MR[2015]['MR_I'],MR[2030]['MR_I']],index=[2015,2030]) # EUR/km
+
+for year in np.arange(2010,2015):
+    MR2_cost[year]= MR2_cost[2015]
+for year in np.arange(2016,2030):
+     MR2_cost[year]= MR2_cost[2015]+( MR2_cost[2030]- MR2_cost[2015])/15*(year-2015)
+
+
+    
+MR2_cost= MR2_cost.sort_index()
+
+#MR3 is for BEB
+#price in year 2015 and 2030 is taken from the excel sheet and then linearize for year 2015 to 2030
+MR3_cost = pd.Series([MR[2015]['MR_B'],MR[2030]['MR_B']],index=[2015,2030]) # EUR/km
+
+for year in np.arange(2010,2015):
+    MR3_cost[year]= MR3_cost[2015]
+for year in np.arange(2016,2030):
+     MR3_cost[year]= MR3_cost[2015]+( MR3_cost[2030]- MR3_cost[2015])/15*(year-2015)
+
+
+    
+MR3_cost= MR3_cost.sort_index()
+
+
+#electricity consumption used by liner regression [EURO/km] and 272 annual days
+
+def Econsumption(Range,W_t,year,km):
+    
+    a =48.38050187 + 3.43211476 * W_t #kwh/100km
+    
+    Econsumption = (a * Range*272)/100
+    
+    E_cost = (Econsumption * Electricity_cost[year])/km
+    
+    return E_cost
+#hydrogen consumption used by liner regression [EURO/km] and 272 annual days
+def Hconsumption(Range,W_t,km,year):
+    
+    
+    H_yearly = (H(W_t)[year] *Range*272)/100/33.33 # 272 days/year and convert kWh to kg by low heating value of hydrogen 33.3 kWh/kg
+    
+    H_cost1 = (H_yearly * H_cost[year])/km
+    
+    return H_cost1
+#Diesel consumption used by liner regression [EURO/km] and 272 annual days
+def Dconsumption(Range,W_t,year,km):
+    
+    y = (7.1718002 * W_t + 130.37272264)/10 #l/100 km and  (1kWh =10l)
+    
+    D_yearly = (y *Range*272 )/100  
+    
+    D_cost = (D_yearly * Diesel_cost[year])/km
+    
+    
+    return D_cost
+
+
+#mainteance and repair for FCT (euro/km)
+
+def MR_F(year,km):
+    
+    y = (MR1_cost[year]*km)/km
+    
+    return y
+#mainteance and repair for BET (euro/km)
+def MR_B(year,km):
+    
+    y = (MR3_cost[year]*km)/km
+    
+    return y
+#mainteance and repair for ICT (euro/km)
+def MR_I(year,km):
+    
+    y =(MR2_cost[year]*km)/km
+    
+    return y
+#insurance is 1.5 % of initial purchase price of vehciel and assumption is same for all three powertrain (euro/km)
+def ins(year,W_t,Range,lifetime,km):
+    
+    insurance = (0.015 * Purchase_Price(year,W_t,Range,lifetime,km))/km
+    
+    return insurance
+
+
+#driver_wages (euro/km) for same all three powertrain
+def Driver_wage(km):
+    
+
+    Driver_wages = fctParams[year]['Driver_wages']/km   #26,406 from the google search for car 
+
+    return Driver_wages
+
+tire = fctParams[year]['Tire']     #tire cost 0.01 euro/km from CE_Delft 
+
+#this used for calculation of effect of mileage and weight on transport capacity
+def Dconsumption1(Range,W_t):
+    
+    y = (7.1718002 * W_t + 130.37272264)/10 #l/100 km
+    
+    D_yearly = (y *Range*272 )/100
+    
+    return D_yearly
+
+#effect of weight and mileage on transport capacity
+
+def z(Range,W_t,year):
+    
+    engine = ictParams[year]['Engine']*1000/ictParams[year]['Power_density']
+    
+    a = ((Dconsumption1(Range,W_t)/272) * 0.83 + (Dconsumption1(Range,W_t)/272) * 0.2 + engine )/1000 # CE Delft Desnity = 0.83kg/l, tank Weight = 0.2kg/l
+    
+    b = M_capacity/(M_capacity-a)
+    
+    return b #transport loss correction factor
+##tax is same for all three powertrain (euro/km)
+tax = 0.01 #ce_Delft 
+
+#operating cost [euro/km] not considered here energy consumption cost
+def OPEX(year,lifetime,W_t,km,Range):
+    
+    fct = (MR_F(year,km)+ins(year,W_t,Range,lifetime,km)['FCT']+tax+tire + Driver_wage(km))
+    
+        
+    bet = ( MR_B(year,km) + ins(year,W_t,Range,lifetime,km)['BET']+tax +tire+ Driver_wage(km))
+   
+    
+         
+    ict = (MR_I(year,km) + ins(year,W_t,Range,lifetime,km)['DT']+ tax +tire + Driver_wage(km))
+       
+    price1=np.array([fct,bet,ict])
+    priceDf=pd.Series(price1,index=busType)
+    return priceDf  
+
+#TCO is in Euro/km with including operating, capital, and energy consumption cost
+def TCO(year,lifetime,km,W_t,Range):
+    
+    
+    tco1 = y(year,Range,W_t)*(OPEX(year,lifetime,W_t,km,Range)['FCT'] +  CAPEX(year,km,W_t,Range,lifetime)['FCT']+Hconsumption(Range,W_t,km,year))
+    
+    
+    tco2 = x(Range,W_t)*(OPEX(year,lifetime,W_t,km,Range)['BET'] + CAPEX(year,km,W_t,Range,lifetime)['BET']+Econsumption(Range,W_t,year,km))
+    
+    
+    
+    tco3 = z(Range,W_t,year)*(OPEX(year,lifetime,W_t,km,Range)['DT'] + CAPEX(year,km,W_t,Range,lifetime)['DT']+Dconsumption(Range,W_t,year,km))
+
+    price1=np.array([tco1,tco2,tco3])
+    priceDf=pd.Series(price1,index=busType)
+    
+    return priceDf
+    
+
+ 
+           
